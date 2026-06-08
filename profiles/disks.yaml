@@ -1,0 +1,32 @@
+disks:
+  - device: /dev/sda
+    table: gpt
+    wipe: true
+
+    partitions:
+      - name: EFI
+        size: 512M
+        type: EFI System
+        filesystem: vfat
+        label: EFI
+        mount_point: /boot/efi
+
+      - name: root
+        size: 50G
+        type: Linux filesystem
+        encryption:
+          type: luks
+          mapping: cryptroot
+        filesystem: ext4
+        label: ROOT
+        mount_point: /
+
+      - name: home
+        size: rest
+        type: Linux filesystem
+        encryption:
+          type: luks
+          mapping: crypthome
+        filesystem: ext4
+        label: HOME
+        mount_point: /home
