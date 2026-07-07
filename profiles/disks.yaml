@@ -1,7 +1,7 @@
 disks:
   - device: /dev/sda
     table: gpt
-    wipe: true
+    wipe: false
 
     partitions:
       - name: EFI
@@ -10,6 +10,7 @@ disks:
         filesystem: vfat
         label: EFI
         mount_point: /boot/efi
+        force: true
 
       - name: root
         size: 50G
@@ -20,6 +21,7 @@ disks:
         filesystem: ext4
         label: ROOT
         mount_point: /
+        force: true
 
       - name: home
         size: rest
