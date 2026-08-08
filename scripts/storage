@@ -11,8 +11,12 @@ libDir="$scriptDir/../lib/lib"
 requireYaml="$scriptDir/../profiles/require.yaml"
 
 source "$libDir/distro.sh"
+source "$libDir/logger.sh"
 source "$libDir/require.sh"
 source "$libDir/yaml_parser.sh"
+
+LOGFILE="/var/log/storage.log"
+LOGFILTER="DEBUG | INFO | WARNING | ERROR"
 
 # ------------------------------------------------------------------------------
 # Global state
@@ -26,7 +30,7 @@ declare -A passphraseMap=()
 # ------------------------------------------------------------------------------
 
 function die() {
-	printf 'ERROR: %s\n' "$*" >&2
+	error "$*"
 	exit 1
 }
 
@@ -76,9 +80,11 @@ function prompt_yes_no() {
 	local question="$1"
 	local answer=""
 
+	info "$question"
 	printf '%s [y/N] ' "$question" >&2
 	read -r answer
 	answer="$(to_lower "$(trim_value "$answer")")"
+	debug "User answer: ${answer:-<empty>}"
 
 	[[ "$answer" == "y" || "$answer" == "yes" ]]
 }
@@ -87,6 +93,7 @@ function prompt_passphrase() {
 	local label="$1"
 	local passphrase=""
 
+	info "Reading passphrase for: $label"
 	printf 'Enter LUKS passphrase for %s: ' "$label" >&2
 	read -rs passphrase
 	printf '\n' >&2
@@ -186,6 +193,7 @@ function partition_matches() {
 
 	partitionDevice="$(partition_device_path "$devicePath" "$partitionIndex")"
 	[[ -e "$partitionDevice" ]] || return 1
+	debug "Checking partition state: $partitionDevice"
 
 	desiredSize="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'size')")"
 	desiredType="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'type')")"
@@ -200,19 +208,23 @@ function partition_matches() {
 	currentMountPoint="$(get_partition_field "$partitionDevice" MOUNTPOINT)"
 
 	if [[ -n "$desiredLabel" && "$desiredLabel" != "$currentLabel" ]]; then
+		debug "Partition label mismatch: expected '$desiredLabel', got '$currentLabel'"
 		return 1
 	fi
 
 	if [[ -n "$desiredFilesystem" && "$desiredFilesystem" != "$currentFilesystem" ]]; then
+		debug "Partition filesystem mismatch: expected '$desiredFilesystem', got '$currentFilesystem'"
 		return 1
 	fi
 
 	if [[ -n "$desiredMountPoint" && "$desiredMountPoint" != "$currentMountPoint" ]]; then
+		debug "Partition mount point mismatch: expected '$desiredMountPoint', got '$currentMountPoint'"
 		return 1
 	fi
 
 	expectedTypeCode="$(partition_type_code "$diskTable" "$desiredType")"
 	if [[ -n "$expectedTypeCode" && "$expectedTypeCode" != "$currentType" ]]; then
+		debug "Partition type mismatch: expected '$expectedTypeCode', got '$currentType'"
 		return 1
 	fi
 
@@ -222,6 +234,7 @@ function partition_matches() {
 
 		expectedSizeBytes="$(size_to_bytes "$desiredSize")"
 		currentSizeBytes="$(size_to_bytes "$currentSize")"
+		debug "Partition size comparison: expected '$expectedSizeBytes', got '$currentSizeBytes'"
 
 		if [[ "$expectedSizeBytes" != "$currentSizeBytes" ]]; then
 			return 1
@@ -240,7 +253,9 @@ function disk_has_non_forced_mismatch() {
 	local partitionIndex
 
 	currentPartitionCount="$(get_disk_partition_count "$devicePath")"
+	debug "Current partition count for $devicePath: $currentPartitionCount"
 	if [[ "$currentPartitionCount" != "$partitionCount" ]]; then
+		warning "Partition count differs for $devicePath: expected $partitionCount, found $currentPartitionCount"
 		return 0
 	fi
 
@@ -249,10 +264,12 @@ function disk_has_non_forced_mismatch() {
 		forceValue="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'force')")"
 
 		if [[ "$forceValue" == "true" ]]; then
+			debug "Skipping forced partition: $(partition_key "$diskIndex" "$partitionIndex" 'force')"
 			continue
 		fi
 
 		if ! partition_matches "$diskTable" "$devicePath" "$diskIndex" "$partitionIndex"; then
+			warning "Partition mismatch detected for $devicePath partition $partitionIndex"
 			return 0
 		fi
 	done
@@ -286,6 +303,7 @@ function read_passphrases() {
 		[[ -n "$label" ]] || continue
 
 		if [[ -z "${passphraseMap[$label]+x}" ]]; then
+			debug "Caching passphrase for encrypted label: $label"
 			passphraseMap["$label"]="$(prompt_passphrase "$label")"
 		fi
 	done
@@ -301,6 +319,7 @@ function luks_format_and_open() {
 		passphrase="$(prompt_passphrase "$label")"
 	fi
 
+	info "Formatting and opening LUKS volume: $label"
 	printf '%s' "$passphrase" | cryptsetup luksFormat --batch-mode --key-file=- "$devicePath"
 	printf '%s' "$passphrase" | cryptsetup open --key-file=- "$devicePath" "$mappingName"
 }
@@ -312,6 +331,7 @@ function luks_open() {
 	local passphrase="${passphraseMap[$label]:-}"
 
 	if cryptsetup status "$mappingName" >/dev/null 2>&1; then
+		debug "LUKS mapping already open: $mappingName"
 		return 0
 	fi
 
@@ -319,6 +339,7 @@ function luks_open() {
 		passphrase="$(prompt_passphrase "$label")"
 	fi
 
+	info "Opening existing LUKS volume: $label"
 	printf '%s' "$passphrase" | cryptsetup open --key-file=- "$devicePath" "$mappingName"
 }
 
@@ -329,6 +350,7 @@ function format_filesystem() {
 	local mkfsCommand="mkfs.$filesystemType"
 
 	require_command "$mkfsCommand"
+	info "Formatting filesystem $filesystemType on $targetDevice"
 
 	case "$filesystemType" in
 		vfat) mkfs.vfat -F 32 -n "$label" "$targetDevice" ;;
@@ -345,9 +367,11 @@ function mount_partition() {
 	mkdir -p "$mountPoint"
 
 	if grep -qs " $mountPoint " /proc/mounts; then
+		debug "Mount point already mounted: $mountPoint"
 		return 0
 	fi
 
+	info "Mounting $targetDevice at $mountPoint"
 	mount "$targetDevice" "$mountPoint"
 }
 
@@ -360,6 +384,7 @@ function create_partitions() {
 	local partitionIndex
 
 	wipefs -a "$devicePath"
+	info "Recreating partition table on $devicePath"
 
 	case "$(to_lower "$diskTable")" in
 		gpt) fdiskScript+="g"$'\n' ;;
@@ -394,7 +419,9 @@ function create_partitions() {
 
 	fdiskScript+="w"$'\n'
 	printf '%s' "$fdiskScript" | fdisk "$devicePath"
-	partprobe "$devicePath" >/dev/null 2>&1 || true
+	if ! partprobe "$devicePath" >/dev/null 2>&1; then
+		warning "partprobe failed for $devicePath, continuing anyway"
+	fi
 }
 
 function handle_partition() {
@@ -420,8 +447,10 @@ function handle_partition() {
 	partitionMountPoint="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'mount_point')")"
 	partitionEncryption="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'encryption.type')")"
 	partitionMapping="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'encryption.mapping')")"
+	debug "Handling partition $partitionIndex on $devicePath"
 
 	if [[ "$rebuildAll" == "true" ]]; then
+		info "Rebuilding partition $partitionLabel"
 		if [[ "$partitionEncryption" == "luks" ]]; then
 			luks_format_and_open "$partitionLabel" "$partitionDevice" "$partitionMapping"
 			format_filesystem "$partitionFilesystem" "$partitionLabel" "/dev/mapper/$partitionMapping"
@@ -434,11 +463,14 @@ function handle_partition() {
 	fi
 
 	[[ -e "$partitionDevice" ]] && currentExists=true
+	debug "Partition device exists: $currentExists"
 	if [[ "$currentExists" == true ]] && partition_matches "$diskTable" "$devicePath" "$diskIndex" "$partitionIndex"; then
 		currentMatches=true
 	fi
+	debug "Partition matches profile: $currentMatches"
 
 	if [[ "$forceValue" != "true" && "$currentMatches" == true ]]; then
+		info "Partition already matches profile: $partitionLabel"
 		if [[ "$partitionEncryption" == "luks" ]]; then
 			luks_open "$partitionLabel" "$partitionDevice" "$partitionMapping"
 			mount_partition "$partitionMountPoint" "/dev/mapper/$partitionMapping"
@@ -449,12 +481,14 @@ function handle_partition() {
 	fi
 
 	if [[ "$forceValue" != "true" && "$currentExists" == true ]]; then
+		warning "Partition differs from profile and may be recreated: $partitionLabel"
 		if ! prompt_yes_no "Partition '$partitionLabel' differs from the profile. May it be recreated?"; then
 			die "Partition '$partitionLabel' was left unchanged by user request."
 		fi
 	fi
 
 	if [[ "$forceValue" != "true" && "$currentExists" == false ]]; then
+		warning "Partition is missing and may be created: $partitionLabel"
 		if ! prompt_yes_no "Partition '$partitionLabel' is missing. May it be created?"; then
 			die "Partition '$partitionLabel' was not created by user request."
 		fi
@@ -465,13 +499,16 @@ function handle_partition() {
 	fi
 
 	if [[ "$partitionEncryption" == "luks" ]]; then
+		info "Recreating encrypted partition: $partitionLabel"
 		luks_format_and_open "$partitionLabel" "$partitionDevice" "$partitionMapping"
 		format_filesystem "$partitionFilesystem" "$partitionLabel" "/dev/mapper/$partitionMapping"
 		mount_partition "$partitionMountPoint" "/dev/mapper/$partitionMapping"
 	else
 		if [[ "$currentExists" == true ]]; then
+			debug "Wiping existing partition before recreation: $partitionDevice"
 			wipefs -a "$partitionDevice"
 		fi
+		info "Formatting plain partition: $partitionLabel"
 		format_filesystem "$partitionFilesystem" "$partitionLabel" "$partitionDevice"
 		mount_partition "$partitionMountPoint" "$partitionDevice"
 	fi
@@ -483,6 +520,7 @@ function handle_partition() {
 
 function main() {
 	local profileFile=""
+	info "Starting storage provisioning"
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -504,8 +542,10 @@ function main() {
 	[[ -n "$profileFile" ]] || die "A YAML profile is required."
 	[[ -r "$profileFile" ]] || die "Unable to read profile file: $profileFile"
 
+	info "Loading profile: $profileFile"
 	parse_yaml "$profileFile" profileMap
 
+	info "Verifying required commands"
 	require_command fdisk
 	require_command lsblk
 	require_command blockdev
@@ -518,6 +558,7 @@ function main() {
 	local diskCount
 	diskCount="$(yaml_get profileMap "disks:length")"
 	[[ -n "$diskCount" ]] || die "No disks were defined in the profile."
+	debug "Disk count: $diskCount"
 
 	local diskIndex
 	for ((diskIndex = 0; diskIndex < diskCount; diskIndex++)); do
@@ -533,12 +574,14 @@ function main() {
 		diskTable="$(yaml_get profileMap "$(disk_key "$diskIndex" 'table')")"
 		wipeValue="$(yaml_get profileMap "$(disk_key "$diskIndex" 'wipe')")"
 		partitionCount="$(yaml_get profileMap "$(disk_key "$diskIndex" 'partitions:length')")"
+		debug "Processing disk $diskIndex: $devicePath"
 
 		[[ -n "$devicePath" ]] || die "Disk device is missing in the profile."
 		[[ -n "$diskTable" ]] || die "Partition table type is missing for $devicePath."
 		[[ -n "$partitionCount" ]] || die "No partitions were defined for $devicePath."
 
 		if [[ "$wipeValue" == "true" ]]; then
+			info "Full rebuild requested for $devicePath"
 			rebuildAll=true
 		elif [[ "$wipeValue" == "false" ]]; then
 			if disk_has_non_forced_mismatch "$diskTable" "$devicePath" "$diskIndex" "$partitionCount"; then
@@ -546,6 +589,7 @@ function main() {
 			fi
 		else
 			if disk_has_non_forced_mismatch "$diskTable" "$devicePath" "$diskIndex" "$partitionCount"; then
+				warning "Partition layout differs from the profile: $devicePath"
 				if prompt_yes_no "The partition layout on $devicePath differs from the profile. May the disk be wiped and recreated?"; then
 					rebuildAll=true
 				else
@@ -555,11 +599,13 @@ function main() {
 		fi
 
 		if [[ "$rebuildAll" == "true" ]]; then
+			info "Collecting encrypted labels for $devicePath"
 			while IFS= read -r label; do
 				encryptedLabels+=("$label")
 			done < <(collect_encrypted_labels "$diskIndex" "$partitionCount")
 
 			read_passphrases "${encryptedLabels[@]}"
+			info "Creating partitions on $devicePath"
 			create_partitions "$diskTable" "$devicePath" "$diskIndex" "$partitionCount"
 		fi
 
@@ -567,6 +613,8 @@ function main() {
 			handle_partition "$diskTable" "$devicePath" "$diskIndex" "$partitionIndex" "$rebuildAll"
 		done
 	done
+
+	info "Storage provisioning finished"
 }
 
 main "$@"
