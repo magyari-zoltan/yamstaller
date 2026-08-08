@@ -3,10 +3,10 @@
 set -euo pipefail
 
 echo "Starting storage provisioning script"
-echo "The id of the user running this script is: $EUID"
 
 if [[ "$EUID" -ne 0 ]]; then
 	echo "Storage must be run as root"
+    echo "The id of the user running this script is: $EUID"
 	exit 1
 fi
 
@@ -14,7 +14,9 @@ fi
 # Bootstrap
 # ------------------------------------------------------------------------------
 
-scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+currentFilesPathIndex=$((${#BASH_SOURCE[@]} - 1))
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[$currentFilesPathIndex]}")" && pwd)"
+
 libDir="$scriptDir/../lib/lib"
 requireYaml="$scriptDir/../profiles/require.yaml"
 
