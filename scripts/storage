@@ -25,11 +25,10 @@ source "$libDir/logger.sh"
 source "$libDir/require.sh"
 source "$libDir/yaml_parser.sh"
 
-LOGFILE="/dev/stderr"
+LOGFILE="/var/log/storage.log"
 LOGFILTER="DEBUG | INFO | WARNING | ERROR"
 
 
-LOGFILE="/var/log/storage.log"
 
 # ------------------------------------------------------------------------------
 # Global state
