@@ -14,8 +14,7 @@ fi
 # Bootstrap
 # ------------------------------------------------------------------------------
 
-currentFilesPathIndex=$((${#BASH_SOURCE[@]} - 1))
-scriptDir="$(cd "$(dirname "${BASH_SOURCE[$currentFilesPathIndex]}")" && pwd)"
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Storage script directory: $scriptDir"
 
 libDir="$scriptDir/../lib/lib"
