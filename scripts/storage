@@ -1,6 +1,14 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -euo pipefail
+
+echo "Starting storage provisioning script"
+echo "The id of the user running this script is: $EUID"
+
+if [[ "$EUID" -ne 0 ]]; then
+	echo "Storage must be run as root"
+	exit 1
+fi
 
 # ------------------------------------------------------------------------------
 # Bootstrap
@@ -10,13 +18,23 @@ scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 libDir="$scriptDir/../lib/lib"
 requireYaml="$scriptDir/../profiles/require.yaml"
 
+echo "Script directory: $scriptDir/distro.sh"
 source "$libDir/distro.sh"
+
+echo "Script directory: $scriptDir/logger.sh"
 source "$libDir/logger.sh"
+
+echo "Script directory: $scriptDir/require.sh"
 source "$libDir/require.sh"
+
+echo "Script directory: $scriptDir/yaml_parser.sh"
 source "$libDir/yaml_parser.sh"
 
-LOGFILE="/var/log/storage.log"
+LOGFILE="/dev/stderr"
 LOGFILTER="DEBUG | INFO | WARNING | ERROR"
+
+
+LOGFILE="/var/log/storage.log"
 
 # ------------------------------------------------------------------------------
 # Global state
