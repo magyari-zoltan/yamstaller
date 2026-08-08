@@ -4,31 +4,28 @@ disks:
     wipe: false
 
     partitions:
-      - name: EFI
+      - label: EFI
         size: 512M
         type: EFI System
         filesystem: vfat
-        label: EFI
         mount_point: /boot/efi
         force: true
 
-      - name: root
+      - label: ROOT
         size: 50G
         type: Linux filesystem
         encryption:
           type: luks
           mapping: cryptroot
         filesystem: ext4
-        label: ROOT
         mount_point: /
         force: true
 
-      - name: home
+      - label: HOME
         size: rest
         type: Linux filesystem
         encryption:
           type: luks
           mapping: crypthome
         filesystem: ext4
-        label: HOME
         mount_point: /home

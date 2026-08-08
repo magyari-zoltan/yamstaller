@@ -1,0 +1,572 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# ------------------------------------------------------------------------------
+# Bootstrap
+# ------------------------------------------------------------------------------
+
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+libDir="$scriptDir/../lib/lib"
+requireYaml="$scriptDir/../profiles/require.yaml"
+
+source "$libDir/distro.sh"
+source "$libDir/require.sh"
+source "$libDir/yaml_parser.sh"
+
+# ------------------------------------------------------------------------------
+# Global state
+# ------------------------------------------------------------------------------
+
+declare -A profileMap=()
+declare -A passphraseMap=()
+
+# ------------------------------------------------------------------------------
+# Utility helpers
+# ------------------------------------------------------------------------------
+
+function die() {
+	printf 'ERROR: %s\n' "$*" >&2
+	exit 1
+}
+
+function usage() {
+	cat <<EOF
+Usage: ${BASH_SOURCE[0]##*/} --profile FILE
+EOF
+}
+
+function disk_key() {
+	local diskIndex="$1"
+	local fieldName="$2"
+
+	printf 'disks[%s].%s' "$diskIndex" "$fieldName"
+}
+
+function partition_key() {
+	local diskIndex="$1"
+	local partitionIndex="$2"
+	local fieldName="$3"
+
+	printf 'disks[%s].partitions[%s].%s' "$diskIndex" "$partitionIndex" "$fieldName"
+}
+
+function yaml_get() {
+	local -n mapRef="$1"
+	local key="$2"
+
+	printf '%s' "${mapRef[$key]:-}"
+}
+
+function to_lower() {
+	local value="$1"
+	printf '%s' "${value,,}"
+}
+
+function trim_value() {
+	local value="$1"
+
+	value="${value#"${value%%[![:space:]]*}"}"
+	value="${value%"${value##*[![:space:]]}"}"
+
+	printf '%s' "$value"
+}
+
+function prompt_yes_no() {
+	local question="$1"
+	local answer=""
+
+	printf '%s [y/N] ' "$question" >&2
+	read -r answer
+	answer="$(to_lower "$(trim_value "$answer")")"
+
+	[[ "$answer" == "y" || "$answer" == "yes" ]]
+}
+
+function prompt_passphrase() {
+	local label="$1"
+	local passphrase=""
+
+	printf 'Enter LUKS passphrase for %s: ' "$label" >&2
+	read -rs passphrase
+	printf '\n' >&2
+	printf '%s' "$passphrase"
+}
+
+function partition_device_path() {
+	local devicePath="$1"
+	local partitionIndex="$2"
+
+	if [[ "$devicePath" =~ [0-9]$ ]]; then
+		printf '%sp%s' "$devicePath" "$((partitionIndex + 1))"
+	else
+		printf '%s%s' "$devicePath" "$((partitionIndex + 1))"
+	fi
+}
+
+function size_to_bytes() {
+	local sizeValue="$1"
+
+	if [[ "$sizeValue" == "rest" ]]; then
+		printf '%s' "rest"
+		return 0
+	fi
+
+	if [[ "$sizeValue" =~ ^([0-9]+)([KMGTP])?$ ]]; then
+		local number="${BASH_REMATCH[1]}"
+		local unit="${BASH_REMATCH[2]:-}"
+		local multiplier=1
+
+		case "$unit" in
+			K) multiplier=$((1024)) ;;
+			M) multiplier=$((1024 * 1024)) ;;
+			G) multiplier=$((1024 * 1024 * 1024)) ;;
+			T) multiplier=$((1024 * 1024 * 1024 * 1024)) ;;
+			P) multiplier=$((1024 * 1024 * 1024 * 1024 * 1024)) ;;
+		esac
+
+		printf '%s' "$((number * multiplier))"
+		return 0
+	fi
+
+	printf '%s' "$sizeValue"
+}
+
+function partition_type_code() {
+	local diskTable="$1"
+	local partitionType="$2"
+
+	case "$(to_lower "$diskTable"):$partitionType" in
+		gpt:"EFI System") printf '%s' 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' ;;
+		gpt:"Linux filesystem") printf '%s' '0fc63daf-8483-4772-8e79-3d69d8477de4' ;;
+		mbr:"EFI System") printf '%s' 'ef' ;;
+		mbr:"Linux filesystem") printf '%s' '83' ;;
+		*) printf '%s' '' ;;
+	esac
+}
+
+function require_command() {
+	local commandName="$1"
+
+	require "$commandName" "$requireYaml"
+}
+
+function get_disk_partition_count() {
+	local devicePath="$1"
+	local deviceName="${devicePath##*/}"
+
+	lsblk -nr -o TYPE,PKNAME "$devicePath" 2>/dev/null | awk -v diskName="$deviceName" '$1 == "part" && $2 == diskName { count++ } END { print count + 0 }'
+}
+
+function get_partition_field() {
+	local partitionDevice="$1"
+	local fieldName="$2"
+
+	lsblk -dn -o "$fieldName" "$partitionDevice" 2>/dev/null | head -n1 | tr -d '\r'
+}
+
+function partition_matches() {
+	local diskTable="$1"
+	local devicePath="$2"
+	local diskIndex="$3"
+	local partitionIndex="$4"
+
+	local partitionDevice
+	local desiredSize
+	local desiredType
+	local desiredLabel
+	local desiredFilesystem
+	local desiredMountPoint
+	local currentSize
+	local currentType
+	local currentLabel
+	local currentFilesystem
+	local currentMountPoint
+	local expectedTypeCode
+
+	partitionDevice="$(partition_device_path "$devicePath" "$partitionIndex")"
+	[[ -e "$partitionDevice" ]] || return 1
+
+	desiredSize="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'size')")"
+	desiredType="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'type')")"
+	desiredLabel="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'label')")"
+	desiredFilesystem="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'filesystem')")"
+	desiredMountPoint="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'mount_point')")"
+
+	currentSize="$(get_partition_field "$partitionDevice" SIZE)"
+	currentType="$(get_partition_field "$partitionDevice" PARTTYPE)"
+	currentLabel="$(get_partition_field "$partitionDevice" PARTLABEL)"
+	currentFilesystem="$(get_partition_field "$partitionDevice" FSTYPE)"
+	currentMountPoint="$(get_partition_field "$partitionDevice" MOUNTPOINT)"
+
+	if [[ -n "$desiredLabel" && "$desiredLabel" != "$currentLabel" ]]; then
+		return 1
+	fi
+
+	if [[ -n "$desiredFilesystem" && "$desiredFilesystem" != "$currentFilesystem" ]]; then
+		return 1
+	fi
+
+	if [[ -n "$desiredMountPoint" && "$desiredMountPoint" != "$currentMountPoint" ]]; then
+		return 1
+	fi
+
+	expectedTypeCode="$(partition_type_code "$diskTable" "$desiredType")"
+	if [[ -n "$expectedTypeCode" && "$expectedTypeCode" != "$currentType" ]]; then
+		return 1
+	fi
+
+	if [[ "$desiredSize" != "rest" ]]; then
+		local expectedSizeBytes
+		local currentSizeBytes
+
+		expectedSizeBytes="$(size_to_bytes "$desiredSize")"
+		currentSizeBytes="$(size_to_bytes "$currentSize")"
+
+		if [[ "$expectedSizeBytes" != "$currentSizeBytes" ]]; then
+			return 1
+		fi
+	fi
+
+	return 0
+}
+
+function disk_has_non_forced_mismatch() {
+	local diskTable="$1"
+	local devicePath="$2"
+	local diskIndex="$3"
+	local partitionCount="$4"
+	local currentPartitionCount
+	local partitionIndex
+
+	currentPartitionCount="$(get_disk_partition_count "$devicePath")"
+	if [[ "$currentPartitionCount" != "$partitionCount" ]]; then
+		return 0
+	fi
+
+	for ((partitionIndex = 0; partitionIndex < partitionCount; partitionIndex++)); do
+		local forceValue
+		forceValue="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'force')")"
+
+		if [[ "$forceValue" == "true" ]]; then
+			continue
+		fi
+
+		if ! partition_matches "$diskTable" "$devicePath" "$diskIndex" "$partitionIndex"; then
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+function collect_encrypted_labels() {
+	local diskIndex="$1"
+	local partitionCount="$2"
+	local partitionIndex
+
+	for ((partitionIndex = 0; partitionIndex < partitionCount; partitionIndex++)); do
+		local encryptionType
+		local label
+
+		encryptionType="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'encryption.type')")"
+		label="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'label')")"
+
+		if [[ "$encryptionType" == "luks" ]]; then
+			printf '%s\n' "$label"
+		fi
+	done
+}
+
+function read_passphrases() {
+	local labels=("$@")
+	local label
+
+	for label in "${labels[@]}"; do
+		[[ -n "$label" ]] || continue
+
+		if [[ -z "${passphraseMap[$label]+x}" ]]; then
+			passphraseMap["$label"]="$(prompt_passphrase "$label")"
+		fi
+	done
+}
+
+function luks_format_and_open() {
+	local label="$1"
+	local devicePath="$2"
+	local mappingName="$3"
+	local passphrase="${passphraseMap[$label]:-}"
+
+	if [[ -z "$passphrase" ]]; then
+		passphrase="$(prompt_passphrase "$label")"
+	fi
+
+	printf '%s' "$passphrase" | cryptsetup luksFormat --batch-mode --key-file=- "$devicePath"
+	printf '%s' "$passphrase" | cryptsetup open --key-file=- "$devicePath" "$mappingName"
+}
+
+function luks_open() {
+	local label="$1"
+	local devicePath="$2"
+	local mappingName="$3"
+	local passphrase="${passphraseMap[$label]:-}"
+
+	if cryptsetup status "$mappingName" >/dev/null 2>&1; then
+		return 0
+	fi
+
+	if [[ -z "$passphrase" ]]; then
+		passphrase="$(prompt_passphrase "$label")"
+	fi
+
+	printf '%s' "$passphrase" | cryptsetup open --key-file=- "$devicePath" "$mappingName"
+}
+
+function format_filesystem() {
+	local filesystemType="$1"
+	local label="$2"
+	local targetDevice="$3"
+	local mkfsCommand="mkfs.$filesystemType"
+
+	require_command "$mkfsCommand"
+
+	case "$filesystemType" in
+		vfat) mkfs.vfat -F 32 -n "$label" "$targetDevice" ;;
+		ext4) mkfs.ext4 -F -L "$label" "$targetDevice" ;;
+		*) die "Unsupported filesystem type: $filesystemType" ;;
+	esac
+}
+
+function mount_partition() {
+	local mountPoint="$1"
+	local targetDevice="$2"
+
+	[[ -n "$mountPoint" ]] || return 0
+	mkdir -p "$mountPoint"
+
+	if grep -qs " $mountPoint " /proc/mounts; then
+		return 0
+	fi
+
+	mount "$targetDevice" "$mountPoint"
+}
+
+function create_partitions() {
+	local diskTable="$1"
+	local devicePath="$2"
+	local diskIndex="$3"
+	local partitionCount="$4"
+	local fdiskScript=""
+	local partitionIndex
+
+	wipefs -a "$devicePath"
+
+	case "$(to_lower "$diskTable")" in
+		gpt) fdiskScript+="g"$'\n' ;;
+		mbr|msdos|dos) fdiskScript+="o"$'\n' ;;
+		*) die "Unsupported partition table: $diskTable" ;;
+	esac
+
+	for ((partitionIndex = 0; partitionIndex < partitionCount; partitionIndex++)); do
+		local partitionSize
+		local partitionType
+		local typeCode
+
+		partitionSize="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'size')")"
+		partitionType="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'type')")"
+		typeCode="$(partition_type_code "$diskTable" "$partitionType")"
+
+		fdiskScript+="n"$'\n'
+		fdiskScript+=$'\n'
+		fdiskScript+=$'\n'
+		if [[ "$partitionSize" == "rest" ]]; then
+			fdiskScript+=$'\n'
+		else
+			fdiskScript+="$partitionSize"$'\n'
+		fi
+
+		if [[ -n "$typeCode" ]]; then
+			fdiskScript+="t"$'\n'
+			fdiskScript+="$((partitionIndex + 1))"$'\n'
+			fdiskScript+="$typeCode"$'\n'
+		fi
+	done
+
+	fdiskScript+="w"$'\n'
+	printf '%s' "$fdiskScript" | fdisk "$devicePath"
+	partprobe "$devicePath" >/dev/null 2>&1 || true
+}
+
+function handle_partition() {
+	local diskTable="$1"
+	local devicePath="$2"
+	local diskIndex="$3"
+	local partitionIndex="$4"
+	local rebuildAll="${5:-false}"
+	local forceValue
+	local partitionDevice
+	local partitionLabel
+	local partitionFilesystem
+	local partitionMountPoint
+	local partitionEncryption
+	local partitionMapping
+	local currentExists=false
+	local currentMatches=false
+
+	forceValue="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'force')")"
+	partitionDevice="$(partition_device_path "$devicePath" "$partitionIndex")"
+	partitionLabel="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'label')")"
+	partitionFilesystem="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'filesystem')")"
+	partitionMountPoint="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'mount_point')")"
+	partitionEncryption="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'encryption.type')")"
+	partitionMapping="$(yaml_get profileMap "$(partition_key "$diskIndex" "$partitionIndex" 'encryption.mapping')")"
+
+	if [[ "$rebuildAll" == "true" ]]; then
+		if [[ "$partitionEncryption" == "luks" ]]; then
+			luks_format_and_open "$partitionLabel" "$partitionDevice" "$partitionMapping"
+			format_filesystem "$partitionFilesystem" "$partitionLabel" "/dev/mapper/$partitionMapping"
+			mount_partition "$partitionMountPoint" "/dev/mapper/$partitionMapping"
+		else
+			format_filesystem "$partitionFilesystem" "$partitionLabel" "$partitionDevice"
+			mount_partition "$partitionMountPoint" "$partitionDevice"
+		fi
+		return 0
+	fi
+
+	[[ -e "$partitionDevice" ]] && currentExists=true
+	if [[ "$currentExists" == true ]] && partition_matches "$diskTable" "$devicePath" "$diskIndex" "$partitionIndex"; then
+		currentMatches=true
+	fi
+
+	if [[ "$forceValue" != "true" && "$currentMatches" == true ]]; then
+		if [[ "$partitionEncryption" == "luks" ]]; then
+			luks_open "$partitionLabel" "$partitionDevice" "$partitionMapping"
+			mount_partition "$partitionMountPoint" "/dev/mapper/$partitionMapping"
+		else
+			mount_partition "$partitionMountPoint" "$partitionDevice"
+		fi
+		return 0
+	fi
+
+	if [[ "$forceValue" != "true" && "$currentExists" == true ]]; then
+		if ! prompt_yes_no "Partition '$partitionLabel' differs from the profile. May it be recreated?"; then
+			die "Partition '$partitionLabel' was left unchanged by user request."
+		fi
+	fi
+
+	if [[ "$forceValue" != "true" && "$currentExists" == false ]]; then
+		if ! prompt_yes_no "Partition '$partitionLabel' is missing. May it be created?"; then
+			die "Partition '$partitionLabel' was not created by user request."
+		fi
+	fi
+
+	if [[ "$currentExists" == false && "$forceValue" == "true" ]]; then
+		die "Partition '$partitionLabel' cannot be created in place; rebuild the disk to create it."
+	fi
+
+	if [[ "$partitionEncryption" == "luks" ]]; then
+		luks_format_and_open "$partitionLabel" "$partitionDevice" "$partitionMapping"
+		format_filesystem "$partitionFilesystem" "$partitionLabel" "/dev/mapper/$partitionMapping"
+		mount_partition "$partitionMountPoint" "/dev/mapper/$partitionMapping"
+	else
+		if [[ "$currentExists" == true ]]; then
+			wipefs -a "$partitionDevice"
+		fi
+		format_filesystem "$partitionFilesystem" "$partitionLabel" "$partitionDevice"
+		mount_partition "$partitionMountPoint" "$partitionDevice"
+	fi
+}
+
+# ------------------------------------------------------------------------------
+# Main flow
+# ------------------------------------------------------------------------------
+
+function main() {
+	local profileFile=""
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			-p|--profile)
+				[[ $# -ge 2 ]] || die "Missing profile file after $1."
+				profileFile="$2"
+				shift 2
+				;;
+			-h|--help)
+				usage
+				return 0
+				;;
+			*)
+				die "Unknown argument: $1"
+				;;
+		esac
+	done
+
+	[[ -n "$profileFile" ]] || die "A YAML profile is required."
+	[[ -r "$profileFile" ]] || die "Unable to read profile file: $profileFile"
+
+	parse_yaml "$profileFile" profileMap
+
+	require_command fdisk
+	require_command lsblk
+	require_command blockdev
+	require_command wipefs
+	require_command cryptsetup
+	require_command mount
+	require_command umount
+	require_command partprobe
+
+	local diskCount
+	diskCount="$(yaml_get profileMap "disks:length")"
+	[[ -n "$diskCount" ]] || die "No disks were defined in the profile."
+
+	local diskIndex
+	for ((diskIndex = 0; diskIndex < diskCount; diskIndex++)); do
+		local devicePath
+		local diskTable
+		local wipeValue
+		local partitionCount
+		local rebuildAll=false
+		local encryptedLabels=()
+		local partitionIndex
+
+		devicePath="$(yaml_get profileMap "$(disk_key "$diskIndex" 'device')")"
+		diskTable="$(yaml_get profileMap "$(disk_key "$diskIndex" 'table')")"
+		wipeValue="$(yaml_get profileMap "$(disk_key "$diskIndex" 'wipe')")"
+		partitionCount="$(yaml_get profileMap "$(disk_key "$diskIndex" 'partitions:length')")"
+
+		[[ -n "$devicePath" ]] || die "Disk device is missing in the profile."
+		[[ -n "$diskTable" ]] || die "Partition table type is missing for $devicePath."
+		[[ -n "$partitionCount" ]] || die "No partitions were defined for $devicePath."
+
+		if [[ "$wipeValue" == "true" ]]; then
+			rebuildAll=true
+		elif [[ "$wipeValue" == "false" ]]; then
+			if disk_has_non_forced_mismatch "$diskTable" "$devicePath" "$diskIndex" "$partitionCount"; then
+				die "The current partition layout on $devicePath does not match the profile."
+			fi
+		else
+			if disk_has_non_forced_mismatch "$diskTable" "$devicePath" "$diskIndex" "$partitionCount"; then
+				if prompt_yes_no "The partition layout on $devicePath differs from the profile. May the disk be wiped and recreated?"; then
+					rebuildAll=true
+				else
+					die "The disk layout was left unchanged by user request."
+				fi
+			fi
+		fi
+
+		if [[ "$rebuildAll" == "true" ]]; then
+			while IFS= read -r label; do
+				encryptedLabels+=("$label")
+			done < <(collect_encrypted_labels "$diskIndex" "$partitionCount")
+
+			read_passphrases "${encryptedLabels[@]}"
+			create_partitions "$diskTable" "$devicePath" "$diskIndex" "$partitionCount"
+		fi
+
+		for ((partitionIndex = 0; partitionIndex < partitionCount; partitionIndex++)); do
+			handle_partition "$diskTable" "$devicePath" "$diskIndex" "$partitionIndex" "$rebuildAll"
+		done
+	done
+}
+
+main "$@"

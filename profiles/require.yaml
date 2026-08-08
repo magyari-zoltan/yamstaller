@@ -1,0 +1,53 @@
+# Information regarding app installation for each supported distro.
+# What package is the app installed from, and what command is used to install it.
+package_manager:
+
+  debian:
+    # Refresh and install command for the package manager.
+    refresh: sudo apt-get update
+    install: sudo apt-get install -y
+
+    # The app section is used to map the name of the app to the package name. 
+    # This is useful when the name of the app is different from the package name.
+    app:
+      fdisk: util-linux 
+      lsblk: util-linux
+      blockdev: util-linux
+      wipefs: util-linux
+      partprobe: util-linux
+      mount: util-linux
+      umount: util-linux
+      mkfs.ext4: e2fsprogs
+      mkfs.vfat: dosfstools
+      bind: dnsutils
+
+  arch:
+    # Refresh and install command for the package manager.
+    refresh: sudo pacman -Syu
+    install: sudo pacman -S --noconfirm
+  
+    # If the app needs to be compiled from source, you can specify the base
+    # folder of custom installation scripts.
+    custom_script_folder: res/
+
+    # The app section is used to map the name of the app to the package name. 
+    # This is useful when the name of the app is different from the package name.
+    app:
+      fdisk: util-linux 
+      lsblk: util-linux
+      blockdev: util-linux
+      wipefs: util-linux
+      partprobe: util-linux
+      mount: util-linux
+      umount: util-linux
+      mkfs.ext4: e2fsprogs
+      mkfs.vfat: dosfstools
+
+      # If the name of the app is identical to the package it is not necessary
+      # to specify the package name, but it is still possible to do so.
+      # bind: bind  
+
+      # If the app needs to be compiled from source, you can specify a script
+      # to run to install it.
+      nodejs: 
+        script: arch/install/nodejs.sh
