@@ -21,16 +21,16 @@ echo "Storage script directory: $scriptDir"
 libDir="$scriptDir/../lib/lib"
 requireYaml="$scriptDir/../profiles/require.yaml"
 
-echo "Script directory: $scriptDir/distro.sh"
+echo "Script directory: $libDir/distro.sh"
 source "$libDir/distro.sh"
 
-echo "Script directory: $scriptDir/logger.sh"
+echo "Script directory: $libDir/logger.sh"
 source "$libDir/logger.sh"
 
-echo "Script directory: $scriptDir/require.sh"
+echo "Script directory: $libDir/require.sh"
 source "$libDir/require.sh"
 
-echo "Script directory: $scriptDir/yaml_parser.sh"
+echo "Script directory: $libDir/yaml_parser.sh"
 source "$libDir/yaml_parser.sh"
 
 LOGFILE="/dev/stderr"
