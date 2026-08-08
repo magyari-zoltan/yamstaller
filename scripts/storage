@@ -16,6 +16,7 @@ fi
 
 currentFilesPathIndex=$((${#BASH_SOURCE[@]} - 1))
 scriptDir="$(cd "$(dirname "${BASH_SOURCE[$currentFilesPathIndex]}")" && pwd)"
+echo "Storage script directory: $scriptDir"
 
 libDir="$scriptDir/../lib/lib"
 requireYaml="$scriptDir/../profiles/require.yaml"
