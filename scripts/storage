@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
-
-echo "Starting storage provisioning script"
-
 if [[ "$EUID" -ne 0 ]]; then
 	echo "Storage must be run as root"
     echo "The id of the user running this script is: $EUID"
@@ -15,11 +11,10 @@ fi
 # ------------------------------------------------------------------------------
 
 scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo "The 'storage.sh' script directory: $scriptDir"
-
 libDir="$scriptDir/../lib/lib"
 requireYaml="$scriptDir/../profiles/require.yaml"
 
+source "$libDir/error_handler.sh"
 source "$libDir/distro.sh"
 source "$libDir/logger.sh"
 source "$libDir/require.sh"
@@ -27,8 +22,11 @@ source "$libDir/yaml_parser.sh"
 
 LOGFILE="/var/log/storage.log"
 LOGFILTER="DEBUG | INFO | WARNING | ERROR"
+ERROR_HANDLER_LOGFILE="$LOGFILE"
 
-
+# Route script failures through the shared error handler so the failing command
+# and its stack trace are written to both stderr and the storage log.
+trap 'error_handler $? "$BASH_COMMAND" $LINENO' ERR
 
 # ------------------------------------------------------------------------------
 # Global state
