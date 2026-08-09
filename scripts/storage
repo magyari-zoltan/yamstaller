@@ -182,6 +182,62 @@ function get_partition_field() {
 	lsblk -dn -o "$fieldName" "$partitionDevice" 2>/dev/null | head -n1 | tr -d '\r'
 }
 
+function release_block_device_users() {
+	local devicePath="$1"
+	local deviceEntries=()
+	local entry
+	local index
+
+	while IFS= read -r entry; do
+		[[ -n "$entry" ]] || continue
+		deviceEntries+=("$entry")
+	done < <(lsblk -nr -P -o PATH,TYPE,MOUNTPOINT,FSTYPE "$devicePath" 2>/dev/null)
+
+	for ((index = ${#deviceEntries[@]} - 1; index >= 0; index--)); do
+		local path
+		local type
+		local mountPoint
+		local filesystemType
+
+		local entryData="${deviceEntries[$index]}"
+
+		path="${entryData#PATH=\"}"
+		path="${path%%\" *}"
+		type="${entryData#*TYPE=\"}"
+		type="${type%%\" *}"
+		mountPoint="${entryData#*MOUNTPOINT=\"}"
+		mountPoint="${mountPoint%%\" *}"
+		filesystemType="${entryData#*FSTYPE=\"}"
+		filesystemType="${filesystemType%%\" *}"
+
+		if [[ -n "$mountPoint" ]]; then
+			debug "Unmounting $path from $mountPoint"
+			umount "$path"
+		fi
+
+		case "$type:$filesystemType" in
+			crypt:*|*:crypto_LUKS)
+				local mappingName="${path##*/}"
+
+				if cryptsetup status "$mappingName" >/dev/null 2>&1; then
+					debug "Closing encrypted mapping: $mappingName"
+					cryptsetup close "$mappingName"
+				fi
+				;;
+			*:swap)
+				debug "Disabling swap device: $path"
+				swapoff "$path"
+				;;
+		esac
+	done
+}
+
+function prepare_device_for_wipe() {
+	local devicePath="$1"
+
+	release_block_device_users "$devicePath"
+}
+
 function partition_matches() {
 	local diskTable="$1"
 	local devicePath="$2"
@@ -393,6 +449,7 @@ function create_partitions() {
 	local fdiskScript=""
 	local partitionIndex
 
+	prepare_device_for_wipe "$devicePath"
 	wipefs -a "$devicePath"
 	info "Recreating partition table on $devicePath"
 
@@ -516,6 +573,7 @@ function handle_partition() {
 	else
 		if [[ "$currentExists" == true ]]; then
 			debug "Wiping existing partition before recreation: $partitionDevice"
+			prepare_device_for_wipe "$partitionDevice"
 			wipefs -a "$partitionDevice"
 		fi
 		info "Formatting plain partition: $partitionLabel"
@@ -563,6 +621,7 @@ function main() {
 	require_command cryptsetup
 	require_command mount
 	require_command umount
+	require_command swapoff
 	require_command partprobe
 
 	local diskCount
