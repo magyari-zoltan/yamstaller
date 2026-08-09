@@ -191,7 +191,7 @@ function release_block_device_users() {
 	while IFS= read -r entry; do
 		[[ -n "$entry" ]] || continue
 		deviceEntries+=("$entry")
-	done < <(lsblk -nr -P -o PATH,TYPE,MOUNTPOINT,FSTYPE "$devicePath" 2>/dev/null)
+	done < <(lsblk -n -P -o PATH,TYPE,MOUNTPOINT,FSTYPE "$devicePath" 2>/dev/null)
 
 	for ((index = ${#deviceEntries[@]} - 1; index >= 0; index--)); do
 		local path
